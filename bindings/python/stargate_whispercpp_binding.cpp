@@ -22,6 +22,8 @@ namespace py = pybind11;
 
 namespace {
 
+constexpr size_t k_max_tokenize_input_bytes = 65536;
+
 struct hotword_entry {
     std::string phrase;
     std::vector<whisper_token> tokens;
@@ -42,43 +44,11 @@ std::string lowercase_ascii(std::string text) {
     return text;
 }
 
-std::string normalize_for_kenlm(const std::string & text) {
-    std::string out;
-    out.reserve(text.size());
-
-    bool prev_space = true;
-    for (size_t i = 0; i < text.size(); ++i) {
-        const unsigned char ch = (unsigned char) text[i];
-        if (std::isalnum(ch) || ch == '\'' || ch == '-') {
-            out.push_back((char) std::tolower(ch));
-            prev_space = false;
-        } else if (!prev_space) {
-            out.push_back(' ');
-            prev_space = true;
-        }
-    }
-
-    if (!out.empty() && out.back() == ' ') {
-        out.pop_back();
-    }
-
-    return out;
-}
-
-std::vector<std::string> split_words(const std::string & text) {
-    std::istringstream stream(text);
-    std::vector<std::string> words;
-    std::string word;
-    while (stream >> word) {
-        words.push_back(word);
-    }
-    return words;
-}
-
-double score_text(callback_data & data, const std::string & text, bool eos = false) {
-    const std::string normalized = normalize_for_kenlm(text);
-    const auto words = split_words(normalized);
-    if (words.empty() || !data.model) {
+double score_token_ids(
+        callback_data & data,
+        const std::vector<whisper_token> & token_ids,
+        bool eos = false) {
+    if (token_ids.empty() || !data.model) {
         return 0.0;
     }
 
@@ -88,8 +58,8 @@ double score_text(callback_data & data, const std::string & text, bool eos = fal
     const auto & vocab = data.model->BaseVocabulary();
 
     data.model->BeginSentenceWrite(state.data());
-    for (size_t i = 0; i < words.size(); ++i) {
-        const auto word_index = vocab.Index(words[i]);
+    for (size_t i = 0; i < token_ids.size(); ++i) {
+        const auto word_index = vocab.Index(std::to_string((int) token_ids[i]));
         total += data.model->BaseFullScore(state.data(), word_index, out_state.data()).prob;
         state.swap(out_state);
     }
@@ -100,39 +70,20 @@ double score_text(callback_data & data, const std::string & text, bool eos = fal
     return total;
 }
 
-std::string decode_tokens_text(
+std::vector<whisper_token> extract_scored_token_ids(
         struct whisper_context * ctx,
         const whisper_token_data * tokens,
         int n_tokens) {
-    std::string result;
+    std::vector<whisper_token> result;
+    result.reserve(std::max(0, n_tokens));
+    const whisper_token eot = whisper_token_eot(ctx);
     for (int i = 0; i < n_tokens; ++i) {
-        if (tokens[i].id >= whisper_token_eot(ctx)) {
+        if (tokens[i].id >= eot) {
             continue;
         }
-        result += whisper_token_to_str(ctx, tokens[i].id);
+        result.push_back(tokens[i].id);
     }
     return result;
-}
-
-bool token_piece_is_boundary_candidate(const std::string & piece) {
-    if (piece.empty()) {
-        return false;
-    }
-
-    const unsigned char first = (unsigned char) piece.front();
-    if (std::isspace(first)) {
-        return true;
-    }
-
-    bool has_alnum = false;
-    bool has_punct = false;
-    for (size_t i = 0; i < piece.size(); ++i) {
-        const unsigned char ch = (unsigned char) piece[i];
-        has_alnum = has_alnum || std::isalnum(ch);
-        has_punct = has_punct || std::ispunct(ch);
-    }
-
-    return has_punct && !has_alnum;
 }
 
 std::vector<whisper_token> tokenize_text(struct whisper_context * ctx, const std::string & text) {
@@ -210,8 +161,8 @@ void kenlm_rescore_callback(
     }
 
     auto * data = static_cast<callback_data *>(user_data);
-    const std::string current_text = decode_tokens_text(ctx, tokens, n_tokens);
-    const double base_score = score_text(*data, current_text, false);
+    std::vector<whisper_token> current_ids = extract_scored_token_ids(ctx, tokens, n_tokens);
+    const double base_score = score_token_ids(*data, current_ids, false);
     const int n_vocab = whisper_n_vocab(ctx);
 
     if (data->rescore_top_k > 0 && n_vocab > 0) {
@@ -239,22 +190,13 @@ void kenlm_rescore_callback(
 
             for (int i = 0; i < k; ++i) {
                 const whisper_token candidate_id = ranked[i].second;
-                const std::string next_piece = whisper_token_to_str(ctx, candidate_id);
-                if (!current_text.empty() && !token_piece_is_boundary_candidate(next_piece)) {
-                    continue;
-                }
-                const std::string candidate_text = current_text + next_piece;
-                const double candidate_score = score_text(*data, candidate_text, false);
+                std::vector<whisper_token> candidate_ids = current_ids;
+                candidate_ids.push_back(candidate_id);
+                const double candidate_score = score_token_ids(*data, candidate_ids, false);
                 const float delta = (float) (candidate_score - base_score);
                 logits[candidate_id] += data->lm_alpha * delta;
             }
         }
-    }
-
-    std::vector<whisper_token> current_ids;
-    current_ids.reserve(std::max(0, n_tokens));
-    for (int i = 0; i < n_tokens; ++i) {
-        current_ids.push_back(tokens[i].id);
     }
 
     for (size_t i = 0; i < data->hotwords.size(); ++i) {
@@ -265,9 +207,9 @@ void kenlm_rescore_callback(
 
         const int matched = matched_prefix_len(current_ids, hotword.tokens);
         const whisper_token next_token = hotword.tokens[matched];
-        const std::string next_piece = whisper_token_to_str(ctx, next_token);
-        const std::string candidate_text = current_text + next_piece;
-        const double candidate_score = score_text(*data, candidate_text, false);
+        std::vector<whisper_token> candidate_ids = current_ids;
+        candidate_ids.push_back(next_token);
+        const double candidate_score = score_token_ids(*data, candidate_ids, false);
         const float delta = (float) (candidate_score - base_score);
         logits[next_token] += data->hotword_bias + data->lm_alpha * delta;
     }
@@ -292,6 +234,25 @@ class WhisperCppBinding {
             whisper_free(ctx_);
             ctx_ = nullptr;
         }
+    }
+
+    std::vector<int> tokenize_to_ids(const std::string & text) {
+        if (ctx_ == nullptr) {
+            throw std::runtime_error("whisper context is not initialized");
+        }
+        if (text.size() > k_max_tokenize_input_bytes) {
+            throw std::runtime_error(
+                "tokenize_to_ids input too long: " + std::to_string(text.size()) +
+                " bytes (max " + std::to_string(k_max_tokenize_input_bytes) + ")");
+        }
+
+        const auto tokens = tokenize_text(ctx_, text);
+        std::vector<int> ids;
+        ids.reserve(tokens.size());
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            ids.push_back((int) tokens[i]);
+        }
+        return ids;
     }
 
     py::dict transcribe_samples(
@@ -399,6 +360,9 @@ PYBIND11_MODULE(_whispercpp_binding, m) {
              py::arg("model_path"),
              py::arg("use_gpu") = false,
              py::arg("gpu_device") = 0)
+           .def("tokenize_to_ids",
+               &WhisperCppBinding::tokenize_to_ids,
+               py::arg("text"))
         .def("transcribe_samples",
              &WhisperCppBinding::transcribe_samples,
              py::arg("samples"),
