@@ -93,6 +93,38 @@ target_include_directories(json_cpp INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
+set(WHISPER_KENLM_CALLBACK_EXAMPLE OFF)
+set(WHISPER_KENLM_MAX_ORDER 6 CACHE STRING "Maximum order used when compiling the optional KenLM callback example")
+if (DEFINED KENLM_ROOT AND NOT "${KENLM_ROOT}" STREQUAL "")
+    set(_KENLM_HINTS
+        "${KENLM_ROOT}"
+        "${KENLM_ROOT}/include"
+        "${KENLM_ROOT}/build"
+        "${KENLM_ROOT}/build/include")
+
+    find_path(KENLM_INCLUDE_DIR
+        NAMES lm/model.hh
+        HINTS ${_KENLM_HINTS}
+        PATH_SUFFIXES "" include include/kenlm)
+
+    find_library(KENLM_LIBRARY
+        NAMES kenlm
+        HINTS "${KENLM_ROOT}" "${KENLM_ROOT}/build"
+        PATH_SUFFIXES lib build/lib)
+
+    find_library(KENLM_UTIL_LIBRARY
+        NAMES kenlm_util
+        HINTS "${KENLM_ROOT}" "${KENLM_ROOT}/build"
+        PATH_SUFFIXES lib build/lib)
+
+    if (KENLM_INCLUDE_DIR AND KENLM_LIBRARY AND KENLM_UTIL_LIBRARY)
+        set(WHISPER_KENLM_CALLBACK_EXAMPLE ON)
+        message(STATUS "KenLM callback example enabled: include=${KENLM_INCLUDE_DIR}")
+    else()
+        message(STATUS "KenLM callback example disabled: set KENLM_ROOT to a KenLM source or install tree with lm/model.hh, libkenlm, and libkenlm_util")
+    endif()
+endif()
+
 if (EMSCRIPTEN)
     add_subdirectory(whisper.wasm)
     add_subdirectory(stream.wasm)
@@ -103,6 +135,9 @@ elseif(CMAKE_JS_VERSION)
     add_subdirectory(addon.node)
 else()
     add_subdirectory(cli)
+    if (WHISPER_KENLM_CALLBACK_EXAMPLE)
+        add_subdirectory(kenlm-callback)
+    endif()
     add_subdirectory(bench)
     add_subdirectory(server)
     add_subdirectory(quantize)

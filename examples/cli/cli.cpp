@@ -13,6 +13,7 @@
 #include <vector>
 #include <cstring>
 #include <cfloat>
+#include <unordered_set>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -98,6 +99,9 @@ struct whisper_params {
 
     std::string dtw = "";
 
+    std::vector<std::string> hotwords = {};
+    float hotword_bias = 0.0f;
+
     std::vector<std::string> fname_inp = {};
     std::vector<std::string> fname_out = {};
 
@@ -114,7 +118,113 @@ struct whisper_params {
     float       vad_samples_overlap = 0.1f;
 };
 
+struct whisper_hotword_bias_data {
+    std::vector<std::vector<whisper_token>> token_sequences;
+    float bias = 0.0f;
+};
+
 static void whisper_print_usage(int argc, char ** argv, const whisper_params & params);
+
+static std::vector<whisper_token> whisper_tokenize_text(
+        struct whisper_context * ctx,
+        const std::string & text) {
+    if (text.empty()) {
+        return {};
+    }
+
+    std::vector<whisper_token> tokens(std::max<int>(16, (int) text.size() * 2));
+    int n_tokens = whisper_tokenize(ctx, text.c_str(), tokens.data(), (int) tokens.size());
+    if (n_tokens < 0) {
+        tokens.resize(-n_tokens);
+        n_tokens = whisper_tokenize(ctx, text.c_str(), tokens.data(), (int) tokens.size());
+    }
+    if (n_tokens <= 0) {
+        return {};
+    }
+
+    tokens.resize(n_tokens);
+    return tokens;
+}
+
+static whisper_hotword_bias_data whisper_build_hotword_bias_data(
+        struct whisper_context * ctx,
+        const whisper_params & params) {
+    whisper_hotword_bias_data result;
+    result.bias = params.hotword_bias;
+
+    if (params.hotwords.empty() || params.hotword_bias <= 0.0f) {
+        return result;
+    }
+
+    std::unordered_set<std::string> seen;
+    for (const auto & hotword : params.hotwords) {
+        if (hotword.empty()) {
+            continue;
+        }
+
+        const std::string variants[] = { hotword, " " + hotword };
+        for (const auto & variant : variants) {
+            if (!seen.insert(variant).second) {
+                continue;
+            }
+
+            auto tokens = whisper_tokenize_text(ctx, variant);
+            if (!tokens.empty()) {
+                result.token_sequences.push_back(std::move(tokens));
+            }
+        }
+    }
+
+    return result;
+}
+
+static void whisper_hotword_logits_filter_callback(
+        struct whisper_context * /* ctx */,
+          struct whisper_state * /* state */,
+      const whisper_token_data * tokens,
+                           int   n_tokens,
+                         float * logits,
+                          void * user_data) {
+    if (user_data == nullptr || logits == nullptr) {
+        return;
+    }
+
+    const auto * hotword_data = static_cast<const whisper_hotword_bias_data *>(user_data);
+    if (hotword_data->bias <= 0.0f || hotword_data->token_sequences.empty()) {
+        return;
+    }
+
+    std::vector<whisper_token> current_tokens;
+    current_tokens.reserve(std::max(0, n_tokens));
+    for (int i = 0; i < n_tokens; ++i) {
+        current_tokens.push_back(tokens[i].id);
+    }
+
+    for (const auto & sequence : hotword_data->token_sequences) {
+        if (sequence.empty()) {
+            continue;
+        }
+
+        int matched = 0;
+        const int max_prefix = std::min<int>((int) sequence.size() - 1, (int) current_tokens.size());
+        for (int prefix = max_prefix; prefix >= 1; --prefix) {
+            bool equal = true;
+            for (int i = 0; i < prefix; ++i) {
+                if (current_tokens[(int) current_tokens.size() - prefix + i] != sequence[i]) {
+                    equal = false;
+                    break;
+                }
+            }
+            if (equal) {
+                matched = prefix;
+                break;
+            }
+        }
+
+        const whisper_token next_token = sequence[matched];
+        logits[next_token] += hotword_data->bias;
+    }
+}
 
 static char * whisper_param_turn_lowercase(char * in){
     int string_len = strlen(in);
@@ -205,6 +315,8 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-nfa"  || arg == "--no-flash-attn")        { params.flash_attn      = false; }
         else if (arg == "-sns"  || arg == "--suppress-nst")         { params.suppress_nst    = true; }
         else if (                  arg == "--suppress-regex")       { params.suppress_regex  = ARGV_NEXT; }
+        else if (                  arg == "--hotword")              { params.hotwords.emplace_back(ARGV_NEXT); }
+        else if (                  arg == "--hotword-bias")         { params.hotword_bias    = std::stof(ARGV_NEXT); }
         else if (                  arg == "--grammar")              { params.grammar         = ARGV_NEXT; }
         else if (                  arg == "--grammar-rule")         { params.grammar_rule    = ARGV_NEXT; }
         else if (                  arg == "--grammar-penalty")      { params.grammar_penalty = std::stof(ARGV_NEXT); }
@@ -287,6 +399,8 @@ static void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params
     fprintf(stderr, "  -nfa,      --no-flash-attn        [%-7s] disable flash attention\n",                        params.flash_attn ? "false" : "true");
     fprintf(stderr, "  -sns,      --suppress-nst         [%-7s] suppress non-speech tokens\n",                     params.suppress_nst ? "true" : "false");
     fprintf(stderr, "  --suppress-regex REGEX            [%-7s] regular expression matching tokens to suppress\n", params.suppress_regex.c_str());
+    fprintf(stderr, "  --hotword WORD                    [%-7s] hotword or phrase to bias via logits callback\n",    params.hotwords.empty() ? "" : params.hotwords.front().c_str());
+    fprintf(stderr, "  --hotword-bias N                 [%-7.2f] positive logit bias applied to hotword continuations\n", params.hotword_bias);
     fprintf(stderr, "  --grammar GRAMMAR                 [%-7s] GBNF grammar to guide decoding\n",                 params.grammar.c_str());
     fprintf(stderr, "  --grammar-rule RULE               [%-7s] top-level GBNF grammar rule name\n",               params.grammar_rule.c_str());
     fprintf(stderr, "  --grammar-penalty N               [%-7.1f] scales down logits of nongrammar tokens\n",      params.grammar_penalty);
@@ -1192,6 +1306,12 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "\n");
         }
 
+        auto hotword_bias_data = whisper_build_hotword_bias_data(ctx, params);
+        if (!hotword_bias_data.token_sequences.empty()) {
+            fprintf(stderr, "%s: hotword bias enabled for %zu phrase(s), bias=%.2f\n",
+                    __func__, hotword_bias_data.token_sequences.size(), hotword_bias_data.bias);
+        }
+
         // run the inference
         {
             whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
@@ -1239,6 +1359,11 @@ int main(int argc, char ** argv) {
             wparams.no_timestamps    = params.no_timestamps;
 
             wparams.suppress_nst     = params.suppress_nst;
+
+            if (!hotword_bias_data.token_sequences.empty()) {
+                wparams.logits_filter_callback = whisper_hotword_logits_filter_callback;
+                wparams.logits_filter_callback_user_data = &hotword_bias_data;
+            }
 
             wparams.vad            = params.vad;
             wparams.vad_model_path = params.vad_model.c_str();
