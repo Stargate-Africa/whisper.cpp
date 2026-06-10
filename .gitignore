@@ -5,6 +5,8 @@
 .coreml/
 .test/
 .venv/
+*.pyc
+__pycache__/
 .vs/
 .vscode/
 .DS_Store
