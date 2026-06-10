@@ -58,6 +58,25 @@ require_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
 
+kenlm_needs_header_only_boost_system_patch() {
+    [[ -d /usr/include/boost/system ]] || return 1
+
+    compgen -G "/usr/lib*/libboost_system*" >/dev/null && return 1
+    compgen -G "/usr/lib*/*/libboost_system*" >/dev/null && return 1
+    return 0
+}
+
+patch_kenlm_for_header_only_boost_system() {
+    local cmakelists="$1/CMakeLists.txt"
+
+    [[ -f "${cmakelists}" ]] || return
+    kenlm_needs_header_only_boost_system_patch || return
+    grep -Fq '  system' "${cmakelists}" || return
+
+    echo "Adjusting KenLM for header-only Boost.System"
+    perl -0pi -e 's/\n  system\n/\n/' "${cmakelists}"
+}
+
 sync_git_checkout() {
     local target_dir="$1"
     local repo_url="$2"
@@ -91,8 +110,12 @@ ensure_kenlm() {
 
     require_cmd git
     sync_git_checkout "${KENLM_ROOT_INPUT}" "${KENLM_REPO_URL}" "master" "KenLM"
+    patch_kenlm_for_header_only_boost_system "${KENLM_ROOT_INPUT}"
     echo "Building KenLM: ${KENLM_ROOT_INPUT}"
-    cmake -S "${KENLM_ROOT_INPUT}" -B "${KENLM_ROOT_INPUT}/build" -DCMAKE_BUILD_TYPE=Release
+    cmake -S "${KENLM_ROOT_INPUT}" -B "${KENLM_ROOT_INPUT}/build" \
+          -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_POLICY_DEFAULT_CMP0167=OLD \
+          -DBoost_NO_BOOST_CMAKE=ON
     cmake --build "${KENLM_ROOT_INPUT}/build" --config Release -j "$(nproc)"
 }
 
