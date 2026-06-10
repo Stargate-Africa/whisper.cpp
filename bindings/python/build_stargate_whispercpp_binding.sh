@@ -4,7 +4,25 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON_DIR="${ROOT_DIR}/bindings/python"
 
-export KENLM_ROOT="${KENLM_ROOT:-/home/ianfe/src/KenLM/third_party/kenlm}"
+resolve_kenlm_root() {
+    if [[ -n "${KENLM_ROOT:-}" ]]; then
+        printf '%s\n' "${KENLM_ROOT}"
+        return
+    fi
+
+    for candidate in \
+        "${ROOT_DIR}/build/kenlm" \
+        "${ROOT_DIR}/third_party/kenlm"; do
+        if [[ -d "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return
+        fi
+    done
+
+    printf '%s\n' "${ROOT_DIR}/build/kenlm"
+}
+
+export KENLM_ROOT="$(resolve_kenlm_root)"
 
 if [[ ! -f "${ROOT_DIR}/build/src/libwhisper.so" ]]; then
     echo "error: libwhisper.so not found under ${ROOT_DIR}/build/src" >&2

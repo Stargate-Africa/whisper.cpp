@@ -13,10 +13,31 @@ WHISPER_INCLUDE = WHISPER_ROOT / "include"
 GGML_INCLUDE = WHISPER_ROOT / "ggml" / "include"
 WHISPER_LIB_DIR = WHISPER_ROOT / "build" / "src"
 
-KENLM_ROOT = Path(os.getenv("KENLM_ROOT", "/home/ianfe/src/KenLM/third_party/kenlm")).resolve()
+def _resolve_kenlm_root() -> Path:
+    override = os.getenv("KENLM_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+
+    for candidate in (
+        WHISPER_ROOT / "build" / "kenlm",
+        WHISPER_ROOT / "third_party" / "kenlm",
+    ):
+        if candidate.exists():
+            return candidate.resolve()
+
+    return (WHISPER_ROOT / "build" / "kenlm").resolve()
+
+
+KENLM_ROOT = _resolve_kenlm_root()
 KENLM_LIB_DIR = KENLM_ROOT / "build" / "lib"
 KENLM_LIB = KENLM_LIB_DIR / "libkenlm.a"
 KENLM_UTIL_LIB = KENLM_LIB_DIR / "libkenlm_util.a"
+
+if not KENLM_LIB.is_file() or not KENLM_UTIL_LIB.is_file():
+    raise RuntimeError(
+        "KenLM static libraries were not found. Set KENLM_ROOT or build KenLM under "
+        f"{KENLM_ROOT}. Expected {KENLM_LIB} and {KENLM_UTIL_LIB}."
+    )
 
 ext_modules = [
     Pybind11Extension(
@@ -39,3 +60,4 @@ setup(
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext},
 )
+
