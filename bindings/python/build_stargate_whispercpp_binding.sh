@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON_DIR="${ROOT_DIR}/bindings/python"
+DEFAULT_KENLM_DIR="$(cd "${ROOT_DIR}/../.." && pwd)/third_party/kenlm"
+LEGACY_KENLM_DIR="${ROOT_DIR}/build/kenlm"
 
 resolve_kenlm_root() {
     if [[ -n "${KENLM_ROOT:-}" ]]; then
@@ -11,15 +13,15 @@ resolve_kenlm_root() {
     fi
 
     for candidate in \
-        "${ROOT_DIR}/build/kenlm" \
-        "${ROOT_DIR}/third_party/kenlm"; do
+        "${DEFAULT_KENLM_DIR}" \
+        "${LEGACY_KENLM_DIR}"; do
         if [[ -d "${candidate}" ]]; then
             printf '%s\n' "${candidate}"
             return
         fi
     done
 
-    printf '%s\n' "${ROOT_DIR}/build/kenlm"
+    printf '%s\n' "${DEFAULT_KENLM_DIR}"
 }
 
 export KENLM_ROOT="$(resolve_kenlm_root)"

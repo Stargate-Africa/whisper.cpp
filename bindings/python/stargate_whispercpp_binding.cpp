@@ -223,7 +223,7 @@ class WhisperCppBinding {
         cparams.flash_attn = true;
         cparams.gpu_device = gpu_device;
 
-        ctx_ = whisper_init_from_file_with_params(model_path.c_str(), cparams);
+                ctx_ = whisper_init_from_file_with_params_no_state(model_path.c_str(), cparams);
         if (ctx_ == nullptr) {
             throw std::runtime_error("failed to initialize whisper context");
         }
@@ -246,6 +246,7 @@ class WhisperCppBinding {
                 " bytes (max " + std::to_string(k_max_tokenize_input_bytes) + ")");
         }
 
+        std::lock_guard<std::mutex> guard(tokenize_mutex_);
         const auto tokens = tokenize_text(ctx_, text);
         std::vector<int> ids;
         ids.reserve(tokens.size());
@@ -304,32 +305,42 @@ class WhisperCppBinding {
             cb.rescore_top_k = std::max(0, rescore_top_k);
             cb.lm_alpha = lm_alpha;
             cb.hotword_bias = hotword_bias;
-            for (const auto & hotword : hotwords) {
-                hotword_entry entry;
-                entry.phrase = hotword;
-                entry.tokens = tokenize_text(ctx_, " " + hotword);
-                if (!entry.tokens.empty()) {
-                    cb.hotwords.push_back(std::move(entry));
+            {
+                std::lock_guard<std::mutex> guard(tokenize_mutex_);
+                for (const auto & hotword : hotwords) {
+                    hotword_entry entry;
+                    entry.phrase = hotword;
+                    entry.tokens = tokenize_text(ctx_, " " + hotword);
+                    if (!entry.tokens.empty()) {
+                        cb.hotwords.push_back(std::move(entry));
+                    }
                 }
             }
             params.logits_filter_callback = kenlm_rescore_callback;
             params.logits_filter_callback_user_data = &cb;
         }
 
-        py::gil_scoped_release release;
-        const int rc = whisper_full(ctx_, params, pcm.data(), (int) pcm.size());
-        py::gil_scoped_acquire acquire;
-        if (rc != 0) {
-            throw std::runtime_error("whisper_full failed with code " + std::to_string(rc));
+        std::unique_ptr<struct whisper_state, decltype(&whisper_free_state)> state(
+            whisper_init_state(ctx_),
+            whisper_free_state);
+        if (state == nullptr) {
+            throw std::runtime_error("failed to initialize whisper state");
         }
 
-        const int n_segments = whisper_full_n_segments(ctx_);
+        py::gil_scoped_release release;
+        const int rc = whisper_full_with_state(ctx_, state.get(), params, pcm.data(), (int) pcm.size());
+        py::gil_scoped_acquire acquire;
+        if (rc != 0) {
+            throw std::runtime_error("whisper_full_with_state failed with code " + std::to_string(rc));
+        }
+
+        const int n_segments = whisper_full_n_segments_from_state(state.get());
         py::list segments;
         std::string full_text;
         for (int i = 0; i < n_segments; ++i) {
-            const char * text = whisper_full_get_segment_text(ctx_, i);
-            const double t0 = whisper_full_get_segment_t0(ctx_, i) / 100.0;
-            const double t1 = whisper_full_get_segment_t1(ctx_, i) / 100.0;
+            const char * text = whisper_full_get_segment_text_from_state(state.get(), i);
+            const double t0 = whisper_full_get_segment_t0_from_state(state.get(), i) / 100.0;
+            const double t1 = whisper_full_get_segment_t1_from_state(state.get(), i) / 100.0;
             std::string segment_text = text ? std::string(text) : std::string();
             full_text += segment_text;
             py::dict seg;
@@ -348,6 +359,7 @@ class WhisperCppBinding {
 
   private:
     struct whisper_context * ctx_ = nullptr;
+        std::mutex tokenize_mutex_;
 };
 
 } // namespace

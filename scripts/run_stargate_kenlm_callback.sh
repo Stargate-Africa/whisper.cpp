@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build-kenlm-callback"
+DEFAULT_KENLM_DIR="$(cd "${ROOT_DIR}/../.." && pwd)/third_party/kenlm"
+LEGACY_KENLM_DIR="${ROOT_DIR}/build/kenlm"
 
 KENLM_ROOT_INPUT="${KENLM_ROOT:-}"
 COMPARE_MODE=0
@@ -54,7 +56,7 @@ EOF
 done
 
 if [[ -z "${KENLM_ROOT_INPUT}" ]]; then
-    for candidate in "${ROOT_DIR}/build/kenlm" "${ROOT_DIR}/third_party/kenlm"; do
+    for candidate in "${DEFAULT_KENLM_DIR}" "${LEGACY_KENLM_DIR}" "${ROOT_DIR}/third_party/kenlm"; do
         if [[ -d "${candidate}" ]]; then
             KENLM_ROOT_INPUT="${candidate}"
             break

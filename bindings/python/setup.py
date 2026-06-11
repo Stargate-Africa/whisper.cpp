@@ -9,6 +9,7 @@ from setuptools import setup
 
 ROOT = Path(__file__).resolve().parent
 WHISPER_ROOT = ROOT.parent.parent
+REPO_ROOT = WHISPER_ROOT.parent.parent
 WHISPER_INCLUDE = WHISPER_ROOT / "include"
 GGML_INCLUDE = WHISPER_ROOT / "ggml" / "include"
 WHISPER_LIB_DIR = WHISPER_ROOT / "build" / "src"
@@ -19,13 +20,14 @@ def _resolve_kenlm_root() -> Path:
         return Path(override).expanduser().resolve()
 
     for candidate in (
+        REPO_ROOT / "third_party" / "kenlm",
         WHISPER_ROOT / "build" / "kenlm",
         WHISPER_ROOT / "third_party" / "kenlm",
     ):
         if candidate.exists():
             return candidate.resolve()
 
-    return (WHISPER_ROOT / "build" / "kenlm").resolve()
+    return (REPO_ROOT / "third_party" / "kenlm").resolve()
 
 
 KENLM_ROOT = _resolve_kenlm_root()

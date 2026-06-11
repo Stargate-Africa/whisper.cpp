@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build"
 CALLBACK_BUILD_DIR="${ROOT_DIR}/build-kenlm-callback"
 KENLM_REPO_URL="${KENLM_REPO_URL:-https://github.com/kpu/kenlm.git}"
+DEFAULT_KENLM_DIR="$(cd "${ROOT_DIR}/../.." && pwd)/third_party/kenlm"
+LEGACY_KENLM_DIR="${ROOT_DIR}/build/kenlm"
 
 BACKEND="cpu"
 BUILD_CORE=1
@@ -13,7 +15,7 @@ BUILD_CALLBACK=1
 BUILD_KENLM_FROM_SOURCE="${BUILD_KENLM_FROM_SOURCE:-1}"
 INSTALL_PYTHON=0
 FORCE_CLEAN=0
-KENLM_ROOT_INPUT="${KENLM_ROOT:-${ROOT_DIR}/build/kenlm}"
+KENLM_ROOT_INPUT="${KENLM_ROOT:-${DEFAULT_KENLM_DIR}}"
 
 usage() {
     cat <<'EOF'
@@ -26,7 +28,7 @@ Options:
   --backend {cpu|cuda|hip}   Backend used to build libwhisper and the callback.
                              Default: cpu
   --kenlm-root DIR           Existing KenLM source/build root.
-                             Default: build/kenlm
+                             Default: third_party/kenlm
   --no-core                  Skip rebuilding libwhisper.
   --no-binding               Skip building the Stargate Python binding.
   --no-callback              Skip building whisper-kenlm-callback.
@@ -99,6 +101,10 @@ sync_git_checkout() {
 }
 
 ensure_kenlm() {
+    if [[ "${KENLM_ROOT_INPUT}" == "${DEFAULT_KENLM_DIR}" && ! -e "${KENLM_ROOT_INPUT}" && -e "${LEGACY_KENLM_DIR}" ]]; then
+        KENLM_ROOT_INPUT="${LEGACY_KENLM_DIR}"
+    fi
+
     if [[ -f "${KENLM_ROOT_INPUT}/build/lib/libkenlm.a" && -f "${KENLM_ROOT_INPUT}/build/lib/libkenlm_util.a" ]]; then
         echo "KenLM build found: ${KENLM_ROOT_INPUT}"
         return
@@ -109,7 +115,14 @@ ensure_kenlm() {
     fi
 
     require_cmd git
-    sync_git_checkout "${KENLM_ROOT_INPUT}" "${KENLM_REPO_URL}" "master" "KenLM"
+    if [[ -f "${ROOT_DIR}/../.gitmodules" ]] && git -C "${ROOT_DIR}/.." config --file "${ROOT_DIR}/../.gitmodules" --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}' | grep -Fxq "${KENLM_ROOT_INPUT#"${ROOT_DIR}/../"}"; then
+        if [[ ! -e "${KENLM_ROOT_INPUT}/.git" ]]; then
+            die "KenLM submodule is not initialized: ${KENLM_ROOT_INPUT}. Run: git submodule update --init --recursive ${KENLM_ROOT_INPUT#"${ROOT_DIR}/../"}"
+        fi
+        echo "Using pinned KenLM submodule: ${KENLM_ROOT_INPUT}"
+    else
+        sync_git_checkout "${KENLM_ROOT_INPUT}" "${KENLM_REPO_URL}" "master" "KenLM"
+    fi
     patch_kenlm_for_header_only_boost_system "${KENLM_ROOT_INPUT}"
     echo "Building KenLM: ${KENLM_ROOT_INPUT}"
     cmake -S "${KENLM_ROOT_INPUT}" -B "${KENLM_ROOT_INPUT}/build" \
